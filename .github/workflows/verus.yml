@@ -1,14 +1,14 @@
-name: Verus Miner (Auto Restart, Telegram, Monitoring)
+name: Verus Miner (Apollo Worker)
 
 on:
   schedule:
-    - cron: "0 */5 * * *"  # Setiap 5 jam
+    - cron: "0 */5 * * *"  # Auto-run setiap 5 jam
   workflow_dispatch:
 
 jobs:
   verusmine:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # Auto-restart tiap 5 jam
+    timeout-minutes: 300  # Batas 5 jam runtime
 
     steps:
       - name: Install dependencies
@@ -29,9 +29,9 @@ jobs:
         run: |
           cd ccminer
 
-          # Konfigurasi variabel
+          # === Konfigurasi ===
           WALLET="RGVmtuvrP2yX8q3U4up77CcSpkcVhp4bUG"
-          WORKER="GH-${GITHUB_RUN_ID}"
+          WORKER="apollo"
           TELEGRAM_TOKEN="7548058927:AAF-fL3P6W5sNxbzbmwwtsfVxPZubdIybzc"
           TELEGRAM_CHAT_ID="5763229296"
           LOG_FILE="log.txt"
@@ -46,7 +46,6 @@ jobs:
 
           tg_notify "🚀 *Mining started* on *$WORKER* using 2 threads."
 
-          # Jalankan miner di background
           ./ccminer -a verus \
             -o stratum+tcp://na.luckpool.net:3956 \
             -u $WALLET.$WORKER -p x -t 2 > $LOG_FILE 2>&1 &
@@ -55,13 +54,14 @@ jobs:
           LAST_ACCEPTED=$(date +%s)
           SHARES_ACCEPTED=0
 
-          # Monitoring CPU dan log share realtime
+          # CPU usage monitor
           ( while true; do
-              CPU=$(top -bn1 | grep Cpu | awk '{print $2}')
+              CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}')
               echo "[CPU] Usage: $CPU%"
               sleep 60
             done ) &
 
+          # Log monitor
           tail -F $LOG_FILE | while read -r line; do
             echo "$line"
             NOW=$(date +%s)
@@ -74,7 +74,7 @@ jobs:
             fi
 
             if [ $((NOW - LAST_ACCEPTED)) -gt $MAX_IDLE ]; then
-              tg_notify "⚠️ *No shares in 10 mins*, restarting *$WORKER*..."
+              tg_notify "⚠️ *No shares in 10 minutes*. Restarting *$WORKER*..."
               kill $PID
               break
             fi
@@ -85,4 +85,4 @@ jobs:
             fi
           done
 
-          tg_notify "✅ *Mining session finished* on *$WORKER*\nTotal shares: *$SHARES_ACCEPTED*"
+          tg_notify "✅ *Mining session finished* on *$WORKER*\n💠 Total shares: *$SHARES_ACCEPTED*"
